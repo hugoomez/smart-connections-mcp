@@ -16,11 +16,35 @@ import { Embedder } from './embeddings.js';
 /** Directories to skip during file discovery. */
 const EXCLUDED_DIRS = new Set(['.smart-env', '.obsidian', '.git', 'node_modules', '.claude']);
 
+/**
+ * True when `filePath` falls under `pathPrefix`, regardless of which slash
+ * direction either side uses.
+ *
+ * `filePath` comes from `fs.promises.readdir(..., {recursive: true})`, which
+ * returns OS-native separators (backslash on Windows). Callers of `reindex`
+ * / `list_indexed` (e.g. the vault's PostToolUse hook, `{"path": "Papers/"}`)
+ * pass POSIX-style prefixes on every platform. A plain `filePath.startsWith(
+ * pathPrefix)` is therefore always false on Windows for any prefix containing
+ * "/" — this is NOT a one-off slash replace; `path.relative` resolves both
+ * sides through Node's platform-aware path module (which already treats
+ * either separator as a boundary on win32), so it stays correct if either
+ * side is ever passed with mixed separators too.
+ */
+export function isUnderPathPrefix(filePath: string, pathPrefix: string): boolean {
+  const rel = path.relative(pathPrefix, filePath);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
 export interface ReindexResult {
   indexed: number;
   skipped: number;
   blocks: number;
   errors: string[];
+  /** Set only when a scoped reindex (pathPrefix given) indexed and skipped
+   *  nothing while its target folder demonstrably has real .md files — the
+   *  exact signature of a prefix-matching failure, not a legitimate no-op.
+   *  See the sanity check at the end of reindex(). */
+  warning?: string;
 }
 
 interface Block {
@@ -59,7 +83,7 @@ async function findStaleFiles(
     const firstDir = filePath.split(path.sep)[0];
     if (EXCLUDED_DIRS.has(firstDir)) continue;
 
-    if (pathPrefix && !filePath.startsWith(pathPrefix)) continue;
+    if (pathPrefix && !isUnderPathPrefix(filePath, pathPrefix)) continue;
 
     // Compare .md mtime against .ajson mtime
     const ajsonPath = path.join(smartEnvPath, 'multi', pathToAjsonFilename(filePath));
@@ -363,7 +387,38 @@ export async function reindex(
     skipped: result.skipped,
     blocks: result.blocks,
     errors: result.errors.length,
+    pathPrefix,
   });
+
+  // SANITY CHECK: a scoped reindex that indexed and skipped nothing looks
+  // like a legitimate no-op (everything already fresh) UNLESS its target
+  // folder demonstrably has real .md files right now — in which case the
+  // prefix match itself found nothing, which is a hook/caller failure, not
+  // a success. This is exactly how the Papers/ path-separator bug above hid
+  // silently for as long as it did; never let that happen invisibly again.
+  if (pathPrefix && result.indexed === 0 && result.skipped === 0) {
+    const prefixDir = path.join(config.resolvedVaultPath, pathPrefix);
+    let folderHasMdFiles = false;
+    try {
+      folderHasMdFiles = fs.readdirSync(prefixDir, { recursive: true })
+        .some((f) => String(f).endsWith('.md'));
+    } catch {
+      // Prefix directory missing or unreadable — nothing to warn about.
+    }
+    if (folderHasMdFiles) {
+      result.warning =
+        `Scoped reindex for "${pathPrefix}" indexed 0 files and skipped 0, but ` +
+        `${prefixDir} contains real .md files. This looks like a prefix-matching ` +
+        `or hook failure, not an up-to-date folder — investigate before trusting ` +
+        `search results scoped to this path.`;
+      log('WARN', 'reindex_suspicious_zero', {
+        pathPrefix,
+        prefixDir,
+        indexed: result.indexed,
+        skipped: result.skipped,
+      });
+    }
+  }
 
   return result;
 }

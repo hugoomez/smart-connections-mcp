@@ -22,7 +22,7 @@ import {
 import { SmartConnectionsData, extractTitle, refreshIfNeeded } from './data.js';
 import { findSimilar, findSimilarToNote, SearchResult } from './search.js';
 import { Embedder } from './embeddings.js';
-import { reindex } from './indexer.js';
+import { reindex, isUnderPathPrefix } from './indexer.js';
 
 // ============================================================================
 // Tool Schemas (Zod)
@@ -411,8 +411,9 @@ export function handleListIndexed(
     // Default to sources only unless includeBlocks is true
     if (!includeBlocks && entry.type === 'block') continue;
 
-    // Apply pattern filter if provided
-    if (pattern && !notePath.startsWith(pattern)) {
+    // Apply pattern filter if provided (same cross-platform prefix match as
+    // reindex's pathPrefix — see isUnderPathPrefix)
+    if (pattern && !isUnderPathPrefix(notePath, pattern)) {
       continue;
     }
 
